@@ -8,6 +8,20 @@
 bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)
 ```
 
+если вы столкнулись с ошибкой
+```fish
+fish: Invalid redirection target: 
+bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)
+     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+If you wish to use process substitution, consider the psub command, see: \`help psub\`
+
+```
+попробуйте
+```bash
+bash (curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh | psub)
+```
+
+
 - вы можете указать свою папку назначения (в которой будут хранится все ваши данные)
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh) "/path/to/your/minecraft"
