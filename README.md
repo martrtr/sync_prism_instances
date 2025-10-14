@@ -7,16 +7,7 @@
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)
 ```
-
-если вы столкнулись с ошибкой
-```fish
-fish: Invalid redirection target: 
-bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)
-     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-If you wish to use process substitution, consider the psub command, see: \`help psub\`
-
-```
-попробуйте
+или этой (если 1я не работает)
 ```bash
 bash (curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh | psub)
 ```
