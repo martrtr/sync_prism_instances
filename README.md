@@ -3,9 +3,12 @@
 Таким образом миры, ресурс паки, шейдеры и скриншоты синхронизируются между выбранными экземплярами игры в Prism Launcher
 
 # Запуск
-
 - вы можете просто запустить скрипт командой
-```bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)```
+```bash
+bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh)
+```
 
 - вы можете указать свою папку назначения (в которой будут хранится все ваши данные)
-```bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh) "/path/to/your/minecraft"```
+```bash
+bash <(curl -s https://raw.githubusercontent.com/march-taylor/sync_prism_instances/main/sync_prism_instances.sh) "/path/to/your/minecraft"
+```
