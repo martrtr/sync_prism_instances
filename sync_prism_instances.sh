@@ -1,55 +1,161 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Настройки
+#######################################
+# CONFIGURATION
+#######################################
+
 PRISM_INSTANCES_DIR="$HOME/.local/share/PrismLauncher/instances"
 TARGET_DIR="${1:-$HOME/.minecraft}"
 
-mkdir -p "$TARGET_DIR"/{saves,resourcepacks,shaderpacks,screenshots}
+# folder = директория
+# file   = одиночный файл
+declare -A SYNC_ITEMS=(
+  [saves]="folder"
+  [resourcepacks]="folder"
+  [shaderpacks]="folder"
+  [screenshots]="folder"
+  [servers.dat]="file"
+)
 
-# список инстансов
+#######################################
+# INITIAL SETUP
+#######################################
+
+mkdir -p "$TARGET_DIR"
+
+for item in "${!SYNC_ITEMS[@]}"; do
+  [[ "${SYNC_ITEMS[$item]}" == "folder" ]] && mkdir -p "$TARGET_DIR/$item"
+done
+
+#######################################
+# FIND INSTANCES
+#######################################
+
 instances=()
 while IFS= read -r -d $'\0' dir; do
   instances+=("$dir")
 done < <(find "$PRISM_INSTANCES_DIR" -maxdepth 2 -type d -name minecraft -print0)
 
-# проверка синхронизации
+#######################################
+# FUNCTIONS
+#######################################
+
+get_instance_name() {
+  basename "$(dirname "$1")"
+}
+
+get_sync_status() {
+  local instance="$1"
+  local synced=()
+
+  for item in "${!SYNC_ITEMS[@]}"; do
+    local path="$instance/$item"
+    if [[ -L "$path" ]]; then
+      synced+=("$item")
+    fi
+  done
+
+  if [[ ${#synced[@]} -eq 0 ]]; then
+    echo "❌ не синхронизирован"
+  else
+    echo "✅ $(IFS=", "; echo "${synced[*]}")"
+  fi
+}
+
+toggle_sync() {
+  local instance="$1"
+  local item="$2"
+
+  local src="$instance/$item"
+  local dst="$TARGET_DIR/$item"
+
+  # отключение синхронизации
+  if [[ -L "$src" ]]; then
+    rm "$src"
+    if [[ "${SYNC_ITEMS[$item]}" == "folder" ]]; then
+      mkdir -p "$src"
+      cp -r "$dst"/* "$src"/ 2>/dev/null || true
+    else
+      [[ -f "$dst" ]] && cp "$dst" "$src"
+    fi
+    echo "❌ $item — синхронизация отключена"
+    return
+  fi
+
+  # включение синхронизации
+  if [[ -e "$src" ]]; then
+    if [[ "${SYNC_ITEMS[$item]}" == "folder" ]]; then
+      cp -r "$src"/* "$dst"/ 2>/dev/null || true
+      rm -rf "$src"
+    else
+      cp "$src" "$dst"
+      rm -f "$src"
+    fi
+  fi
+
+  ln -s "$dst" "$src"
+  echo "✅ $item — синхронизация включена"
+}
+
+#######################################
+# INSTANCE SELECTION MENU
+#######################################
+
 echo "Доступные инстансы:"
 i=1
 for instance in "${instances[@]}"; do
-  sync_status="❌ Не синхронизирован"
-  if [[ -L "$instance/saves" && -L "$instance/resourcepacks" && \
-        -L "$instance/shaderpacks" && -L "$instance/screenshots" ]]; then
-    sync_status="✅ Синхронизирован"
-  fi
-  instance_name=$(basename "$(dirname "$instance")")
-  printf "%2d. %s (%s)\n" $i "$instance_name" "$sync_status"
+  name=$(get_instance_name "$instance")
+  status=$(get_sync_status "$instance")
+  printf "%2d. %s (%s)\n" "$i" "$name" "$status"
   ((i++))
 done
 
-# выбор инстанса
 echo
-read -p "Выберите номер инстанса: " num
-selected="${instances[$((num-1))]}"
-instance_name=$(basename "$(dirname "$selected")")
+read -rp "Выберите номер инстанса: " num
+instance="${instances[$((num-1))]}"
+instance_name=$(get_instance_name "$instance")
 
-# перенос данных и создание симлинков
-for folder in saves resourcepacks shaderpacks screenshots; do
-  source_dir="$selected/$folder"
-  target_dir="$TARGET_DIR/$folder"
-  
-  if [[ -L "$source_dir" ]]; then
-    echo "Пропускаем $folder (уже симлинк)"
-    continue
-  fi
+#######################################
+# SYNC SELECTION MENU
+#######################################
 
-  if [[ -d "$source_dir" && -n "$(ls -A "$source_dir")" ]]; then
-    echo "Переносим $folder из $instance_name"
-    cp -r "$source_dir"/* "$target_dir"/ 2>/dev/null
-  fi
+while true; do
+  echo
+  echo "Инстанс: $instance_name"
+  echo "Выберите, что синхронизировать (повторный выбор — отключение):"
 
-  rm -rf "$source_dir"
-  ln -s "$target_dir" "$source_dir"
-  echo "Создан симлинк для $folder"
+  idx=1
+  keys=()
+  for item in "${!SYNC_ITEMS[@]}"; do
+    status=" "
+    [[ -L "$instance/$item" ]] && status="✔"
+    printf " %d. [%s] %s\n" "$idx" "$status" "$item"
+    keys+=("$item")
+    ((idx++))
+  done
+
+  echo " A. [✔] всё / отключить всё"
+  echo " Q. выход"
+
+  read -rp "> " choice
+
+  case "$choice" in
+    [Qq]) break ;;
+    [Aa])
+      for item in "${!SYNC_ITEMS[@]}"; do
+        toggle_sync "$instance" "$item"
+      done
+      ;;
+    *)
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keys[@]} )); then
+        toggle_sync "$instance" "${keys[$((choice-1))]}"
+      else
+        echo "Неверный выбор"
+      fi
+      ;;
+  esac
 done
 
-echo "Готово! Данные перенесены в $TARGET_DIR"
+echo
+echo "Готово. Синхронизация обновлена."
