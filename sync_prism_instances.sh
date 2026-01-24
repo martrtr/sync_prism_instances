@@ -48,19 +48,31 @@ get_instance_name() {
 get_sync_status() {
   local instance="$1"
   local synced=()
+  local total=${#SYNC_ITEMS[@]}
 
   for item in "${!SYNC_ITEMS[@]}"; do
-    local path="$instance/$item"
-    if [[ -L "$path" ]]; then
-      synced+=("$item")
-    fi
+    [[ -L "$instance/$item" ]] && synced+=("$item")
   done
 
   if [[ ${#synced[@]} -eq 0 ]]; then
-    echo "❌ не синхронизирован"
-  else
-    echo "✅ $(IFS=", "; echo "${synced[*]}")"
+    echo "— не синхронизировано"
+    return
   fi
+
+  if [[ ${#synced[@]} -eq $total ]]; then
+    echo "✔ всё"
+    return
+  fi
+
+  local pretty=()
+  for item in "${synced[@]}"; do
+    case "$item" in
+      servers.dat) pretty+=("servers") ;;
+      *)           pretty+=("$item") ;;
+    esac
+  done
+
+  echo "✔ $(IFS=" • "; echo "${pretty[*]}")"
 }
 
 toggle_sync() {
