@@ -1,14 +1,8 @@
 # sync_prism_instances
 
-Минималистичный TUI/CLI для Prism Launcher. Скрипт делает общими между выбранными инстансами:
+Минималистичный TUI/CLI для Prism Launcher. Делает общими между инстансами миры, ресурспаки, шейдеры, скриншоты и список серверов.
 
-- миры;
-- ресурспаки;
-- шейдеры;
-- скриншоты;
-- список серверов.
-
-Данные хранятся в общей папке (по умолчанию `~/.minecraft`), а в инстансах создаются симлинки. При подключении `servers.dat` списки **объединяются**, поэтому уже добавленные серверы не пропадают.
+Данные хранятся в общей папке (по умолчанию `~/.minecraft`). Каталоги подключаются симлинками, а `servers.dat` перед подключением объединяется без потери уже добавленных серверов. Если Minecraft заменит симлинк `servers.dat` обычным файлом при сохранении, следующий запуск скрипта автоматически сольёт изменения обратно и восстановит ссылку.
 
 Требования: Linux, Bash 4+, Python 3.
 
@@ -24,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances
 bash (curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances/main/sync_prism_instances.sh | psub)
 ```
 
-Свой каталог для общих данных:
+Свой каталог:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances/main/sync_prism_instances.sh) --target ~/MinecraftShared
@@ -44,8 +38,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances
 ```
 
 `ITEMS`: `saves,resourcepacks,shaderpacks,screenshots,servers` или `all`.
-
-Пример:
 
 ```bash
 ./sync_prism_instances.sh --instance "Fabric 1.21" --enable saves,servers

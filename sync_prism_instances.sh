@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly VERSION="2.0.0"
+readonly VERSION="2.1.0"
 readonly DEFAULT_TARGET="$HOME/.minecraft"
 readonly RAW_BASE="https://raw.githubusercontent.com/martrtr/sync_prism_instances/main"
+readonly SERVER_MARKER_NAME=".sync_prism_instances.servers"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
 
 SYNC_ITEMS=(saves resourcepacks shaderpacks screenshots servers.dat)
@@ -82,7 +83,7 @@ normalize_item() {
 
 parse_item_list() {
   local raw="$1" token item
-  local -a result=()
+  local -a result=() tokens=()
   if [[ "${raw,,}" == "all" || "${raw,,}" == "всё" ]]; then
     printf '%s\n' "${SYNC_ITEMS[@]}"
     return
@@ -138,11 +139,40 @@ get_instance_name() {
   basename "$(dirname "$1")"
 }
 
-is_synced() {
-  local instance="$1" item="$2"
-  local src="$instance/$item" dst="$TARGET_DIR/$item"
+link_points_to() {
+  local src="$1" dst="$2"
   [[ -L "$src" ]] || return 1
   [[ "$(canonical_path "$src")" == "$(canonical_path "$dst")" ]]
+}
+
+server_marker() {
+  printf '%s/%s\n' "$1" "$SERVER_MARKER_NAME"
+}
+
+servers_managed() {
+  local instance="$1" marker saved_target
+  marker="$(server_marker "$instance")"
+  [[ -f "$marker" ]] || return 1
+  IFS= read -r saved_target < "$marker" || return 1
+  [[ -n "$saved_target" ]] || return 1
+  [[ "$(canonical_path "$saved_target")" == "$TARGET_DIR" ]]
+}
+
+write_server_marker() {
+  local instance="$1" marker tmp
+  marker="$(server_marker "$instance")"
+  tmp="$(mktemp "$instance/.sync_prism_instances.servers.tmp.XXXXXX")"
+  printf '%s\n' "$TARGET_DIR" > "$tmp"
+  mv -f -- "$tmp" "$marker"
+}
+
+is_synced() {
+  local instance="$1" item="$2"
+  if [[ "$item" == servers.dat ]]; then
+    servers_managed "$instance"
+  else
+    link_points_to "$instance/$item" "$TARGET_DIR/$item"
+  fi
 }
 
 ensure_target() {
@@ -196,12 +226,72 @@ merge_servers_dat() {
   mv -f -- "$tmp" "$shared"
 }
 
+migrate_legacy_server_state() {
+  local instance src old dst
+  dst="$TARGET_DIR/servers.dat"
+  for instance in "${instances[@]}"; do
+    servers_managed "$instance" && continue
+    src="$instance/servers.dat"
+    old="$instance/servers.dat_old"
+    # v2.0 хранил состояние только в самом симлинке. После atomic replace
+    # Minecraft часто оставляет прежний линк в servers.dat_old.
+    if link_points_to "$src" "$dst" || link_points_to "$old" "$dst"; then
+      write_server_marker "$instance"
+    fi
+  done
+}
+
+reconcile_server_instance() {
+  local instance="$1" src dst
+  servers_managed "$instance" || return 0
+  src="$instance/servers.dat"
+  dst="$TARGET_DIR/servers.dat"
+
+  if link_points_to "$src" "$dst"; then
+    return 0
+  fi
+
+  if [[ -L "$src" ]]; then
+    warn "$(get_instance_name "$instance")/servers.dat — сторонняя символьная ссылка; не перезаписываю"
+    return 1
+  fi
+  if [[ -e "$src" && ! -f "$src" ]]; then
+    warn "$src существует, но это не файл; не перезаписываю"
+    return 1
+  fi
+
+  # Если игра заменила симлинк обычным servers.dat, сначала забираем все
+  # изменения из него в общий файл. Локальный файл удаляется только после
+  # успешного NBT merge.
+  if [[ -f "$src" ]]; then
+    merge_servers_dat "$dst" "$src" || {
+      warn "не удалось объединить servers.dat инстанса $(get_instance_name "$instance"); локальный файл сохранён"
+      return 1
+    }
+    rm -f -- "$src"
+  elif [[ ! -f "$dst" ]]; then
+    merge_servers_dat "$dst" "" || return 1
+  fi
+
+  ln -s -- "$dst" "$src"
+}
+
+reconcile_managed_servers() {
+  local instance
+  for instance in "${instances[@]}"; do
+    if servers_managed "$instance"; then
+      reconcile_server_instance "$instance" || true
+    fi
+  done
+}
+
 enable_sync() {
   local instance="$1" item="$2"
   local src="$instance/$item" dst="$TARGET_DIR/$item" type
   type="$(item_type "$item")"
 
   if is_synced "$instance" "$item"; then
+    [[ "$item" == servers.dat ]] && reconcile_server_instance "$instance"
     return 0
   fi
   if [[ -L "$src" ]]; then
@@ -227,38 +317,36 @@ enable_sync() {
         warn "$src существует, но это не файл — пропускаю"
         return 1
       fi
-      merge_servers_dat "$dst" "$src"
+      merge_servers_dat "$dst" "$src" || return 1
       [[ -e "$src" ]] && rm -f -- "$src"
       ln -s -- "$dst" "$src"
+      write_server_marker "$instance"
       ;;
   esac
 }
 
 disable_sync() {
   local instance="$1" item="$2"
-  local src="$instance/$item" dst="$TARGET_DIR/$item" type
+  local src="$instance/$item" dst="$TARGET_DIR/$item" type marker
   type="$(item_type "$item")"
 
   is_synced "$instance" "$item" || return 0
-  rm -- "$src"
   case "$type" in
     folder)
+      rm -- "$src"
       mkdir -p "$src"
       [[ -d "$dst" ]] && copy_dir_contents "$dst" "$src"
       ;;
     servers)
+      # Сначала забираем возможные изменения, сделанные Minecraft после
+      # разрушения симлинка, и только потом отключаем управление.
+      reconcile_server_instance "$instance" || return 1
+      rm -f -- "$src"
       [[ -f "$dst" ]] && cp -a -- "$dst" "$src"
+      marker="$(server_marker "$instance")"
+      rm -f -- "$marker"
       ;;
   esac
-  return 0
-}
-
-status_count() {
-  local instance="$1" item count=0
-  for item in "${SYNC_ITEMS[@]}"; do
-    is_synced "$instance" "$item" && ((count += 1))
-  done
-  printf '%d\n' "$count"
 }
 
 status_line() {
@@ -388,7 +476,7 @@ render_item_picker() {
   local instance="$1" selected="$2"
   shift 2
   local -a desired=("$@")
-  local i item prefix box current note=''
+  local i item prefix box current note
   printf '\e[H\e[2J'
   printf 'Prism Sync  %s\n\n' "$VERSION"
   printf '%s\n\n' "$(get_instance_name "$instance")"
@@ -499,6 +587,11 @@ main() {
   resolve_prism_dir
   ensure_target
   find_instances
+
+  # v2.0 определял серверную синхронизацию по симлинку. Мигрируем такие
+  # инстансы и каждый запуск восстанавливаем servers.dat, если игра его заменила.
+  migrate_legacy_server_state
+  reconcile_managed_servers
 
   case "$ACTION" in
     '') run_tui ;;
