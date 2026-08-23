@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/sync_prism_instances.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+export XDG_DATA_HOME="$TMP/data dir"
 
 mkdir -p \
   "$TMP/instances/A/.minecraft/saves/world-A" \
@@ -14,188 +15,187 @@ printf A > "$TMP/instances/A/.minecraft/saves/world-A/level.dat"
 printf B > "$TMP/instances/B/.minecraft/saves/world-B/level.dat"
 printf hidden > "$TMP/instances/A/.minecraft/saves/.hidden"
 
-python3 - "$TMP" <<'PY'
-import pathlib
-import struct
+cat > "$TMP/instances/A/instance.cfg" <<'CFG'
+InstanceType=OneSix
+OverrideCommands=true
+PreLaunchCommand=python3 -c \"open('pre.called','w').write('1')\"
+PostExitCommand=python3 -c \"open('post.called','w').write('1')\"
+name=A
+CFG
+cat > "$TMP/instances/B/instance.cfg" <<'CFG'
+InstanceType=OneSix
+name=B
+CFG
+cat > "$TMP/prismlauncher.cfg" <<'CFG'
+PreLaunchCommand=python3 -c \"open('global-pre.called','w').write('1')\"
+PostExitCommand=python3 -c \"open('global-post.called','w').write('1')\"
+CFG
+
+write_servers() {
+  local path="$1"; shift
+  PYTHONPATH="$ROOT" python3 - "$path" "$@" <<'PY'
+from pathlib import Path
 import sys
+import server_sync as s
 
-root = pathlib.Path(sys.argv[1])
-
-def mutf8(value):
-    raw = value.encode("utf-16-be", errors="surrogatepass")
-    out = bytearray()
-    for i in range(0, len(raw), 2):
-        unit = (raw[i] << 8) | raw[i + 1]
-        if 1 <= unit <= 0x7F:
-            out.append(unit)
-        elif unit <= 0x7FF:
-            out.extend((0xC0 | (unit >> 6), 0x80 | (unit & 0x3F)))
-        else:
-            out.extend((0xE0 | (unit >> 12), 0x80 | ((unit >> 6) & 0x3F), 0x80 | (unit & 0x3F)))
-    return bytes(out)
-
-def string(value):
-    data = mutf8(value)
-    return struct.pack(">H", len(data)) + data
-
-def server(name, ip, accept=0):
-    return (
-        b"\x01" + string("acceptTextures") + struct.pack(">b", accept)
-        + b"\x08" + string("ip") + string(ip)
-        + b"\x08" + string("name") + string(name)
-        + b"\x00"
-    )
-
-def write(path, entries):
-    data = (
-        b"\x0a" + string("")
-        + b"\x09" + string("servers") + b"\x0a" + struct.pack(">i", len(entries))
-        + b"".join(entries)
-        + b"\x00"
-    )
-    path.write_bytes(data)
-
-write(root / "instances/A/.minecraft/servers.dat", [
-    server("Alpha 🚀", "alpha.example", 1),
-    server("Общий", "same.example"),
-])
-write(root / "instances/B/.minecraft/servers.dat", [
-    server("Beta", "beta.example"),
-    server("Дубликат", "same.example", 1),
-])
+path = Path(sys.argv[1])
+entries = []
+for spec in sys.argv[2:]:
+    name, ip = spec.split('|', 1)
+    entries.append({
+        'acceptTextures': (s.TAG_BYTE, 1),
+        'ip': (s.TAG_STRING, ip),
+        'name': (s.TAG_STRING, name),
+    })
+s.save_nbt(path, s.with_servers(s.empty_document(), entries))
 PY
-
-run() {
-  HOME="$TMP" bash "$SCRIPT" --prism-dir "$TMP/instances" --target "$TMP/shared" "$@"
 }
 
 assert_ips() {
-  local file="$1" expected="$2"
-  python3 - "$file" "$expected" <<'PY'
-import io
-import struct
+  local path="$1" expected="$2"
+  PYTHONPATH="$ROOT" python3 - "$path" "$expected" <<'PY'
+from pathlib import Path
 import sys
+import server_sync as s
 
-f = io.BytesIO(open(sys.argv[1], "rb").read())
-expected = sys.argv[2].split(",") if sys.argv[2] else []
-
-def read(n): return f.read(n)
-def u8(): return struct.unpack(">B", read(1))[0]
-def i32(): return struct.unpack(">i", read(4))[0]
-def string_bytes():
-    n = struct.unpack(">H", read(2))[0]
-    return read(n)
-def ascii_string(): return string_bytes().decode("ascii")
-
-assert u8() == 10
-assert ascii_string() == ""
-assert u8() == 9 and ascii_string() == "servers" and u8() == 10
-ips = []
-for _ in range(i32()):
-    ip = None
-    while True:
-        tag = u8()
-        if tag == 0:
-            break
-        name = ascii_string()
-        if tag == 1:
-            read(1)
-        elif tag == 8:
-            value = string_bytes()
-            if name == "ip":
-                ip = value.decode("ascii")
-        else:
-            raise AssertionError(f"unexpected tag {tag}")
-    ips.append(ip)
+doc = s.load_nbt(Path(sys.argv[1]))
+ips = [s.string_tag(x, 'ip') for x in s.entries(doc)]
+expected = [x for x in sys.argv[2].split(',') if x]
 assert ips == expected, (ips, expected)
 PY
+}
+
+write_servers "$TMP/instances/A/.minecraft/servers.dat" \
+  'Alpha 🚀|alpha.example' 'Общий|same.example'
+write_servers "$TMP/instances/B/.minecraft/servers.dat" \
+  'Beta|beta.example' 'Дубликат|same.example'
+
+run() {
+  HOME="$TMP" XDG_DATA_HOME="$XDG_DATA_HOME" bash "$SCRIPT" \
+    --prism-dir "$TMP/instances" --target "$TMP/shared" "$@"
 }
 
 run --instance A --enable all >/dev/null
 run --instance B --enable all >/dev/null
 
-[[ -L "$TMP/instances/A/.minecraft/servers.dat" ]]
-[[ -L "$TMP/instances/B/.minecraft/servers.dat" ]]
-[[ -f "$TMP/instances/A/.minecraft/.sync_prism_instances.servers" ]]
-[[ -f "$TMP/instances/B/.minecraft/.sync_prism_instances.servers" ]]
+# Directories still use symlinks and preserve hidden files.
+[[ -L "$TMP/instances/A/.minecraft/saves" ]]
+[[ -L "$TMP/instances/B/.minecraft/saves" ]]
 [[ -f "$TMP/shared/saves/world-A/level.dat" ]]
 [[ -f "$TMP/shared/saves/world-B/level.dat" ]]
 [[ -f "$TMP/shared/saves/.hidden" ]]
-assert_ips "$TMP/shared/servers.dat" "alpha.example,same.example,beta.example"
 
-# Minecraft может сохранить servers.dat через atomic replace: симлинк исчезает,
-# а на его месте появляется обычный файл. Следующий запуск должен забрать
-# изменения, восстановить ссылку и не потерять состояние синхронизации.
-python3 - "$TMP" <<'PY'
-import os
-import pathlib
-import struct
+# servers.dat MUST NOT be a symlink anymore.  Prism hooks own its lifecycle.
+[[ -f "$TMP/instances/A/.minecraft/servers.dat" && ! -L "$TMP/instances/A/.minecraft/servers.dat" ]]
+[[ -f "$TMP/instances/B/.minecraft/servers.dat" && ! -L "$TMP/instances/B/.minecraft/servers.dat" ]]
+[[ -f "$TMP/instances/A/.minecraft/.sync_prism_instances.servers.json" ]]
+[[ -f "$TMP/instances/B/.minecraft/.sync_prism_instances.servers.json" ]]
+grep -q '^OverrideCommands=true$' "$TMP/instances/A/instance.cfg"
+grep -q 'server_sync.py.*hook pre' "$TMP/instances/A/instance.cfg"
+grep -q 'server_sync.py.*hook post' "$TMP/instances/A/instance.cfg"
+
+RUNTIME="$XDG_DATA_HOME/sync_prism_instances/server_sync.py"
+[[ -f "$RUNTIME" ]]
+
+# Parse the command exactly as QSettings + QProcess would conceptually see it.
+PYTHONPATH="$ROOT" python3 - "$TMP/instances/A/instance.cfg" "$RUNTIME" <<'PY'
+from pathlib import Path
+import shlex
 import sys
+import server_sync as s
+_, values = s.read_ini(Path(sys.argv[1]))
+command = s.qt_ini_decode(values['PreLaunchCommand'])
+argv = shlex.split(command)
+assert Path(argv[0]).resolve() == Path(sys.executable).resolve(), argv
+assert Path(argv[1]).resolve() == Path(sys.argv[2]).resolve(), argv
+assert argv[2:] == ['hook', 'pre'], argv
+PY
 
-root = pathlib.Path(sys.argv[1])
-mc = root / "instances/A/.minecraft"
-
-def string(value):
-    data = value.encode("ascii")
-    return struct.pack(">H", len(data)) + data
-
-def server(name, ip):
-    return b"\x08" + string("ip") + string(ip) + b"\x08" + string("name") + string(name) + b"\x00"
-
-data = (
-    b"\x0a" + string("")
-    + b"\x09" + string("servers") + b"\x0a" + struct.pack(">i", 2)
-    + server("Alpha", "alpha.example")
-    + server("Gamma", "gamma.example")
-    + b"\x00"
+# User scenario: launch A, add a server, close A. Post-exit must export it.
+(
+  cd "$TMP/instances/A/.minecraft"
+  python3 "$RUNTIME" hook pre
 )
-tmp = mc / "servers.dat.tmp"
-tmp.write_bytes(data)
-os.replace(tmp, mc / "servers.dat")
+[[ -f "$TMP/instances/A/.minecraft/pre.called" ]]
+assert_ips "$TMP/instances/A/.minecraft/servers.dat" 'alpha.example,same.example,beta.example'
+write_servers "$TMP/instances/A/.minecraft/servers.dat" \
+  'Alpha 🚀|alpha.example' 'Общий|same.example' 'Beta|beta.example' 'Новый A|new-a.example'
+(
+  cd "$TMP/instances/A/.minecraft"
+  python3 "$RUNTIME" hook post
+)
+[[ -f "$TMP/instances/A/.minecraft/post.called" ]]
+assert_ips "$TMP/shared/servers.dat" 'alpha.example,same.example,beta.example,new-a.example'
+
+# Launch B afterwards: pre-launch imports A's freshly saved list before Minecraft starts.
+(
+  cd "$TMP/instances/B/.minecraft"
+  python3 "$RUNTIME" hook pre
+)
+assert_ips "$TMP/instances/B/.minecraft/servers.dat" 'alpha.example,same.example,beta.example,new-a.example'
+[[ -f "$TMP/instances/B/.minecraft/global-pre.called" ]]
+
+# B deletes Alpha and adds New B.  This should propagate too (real sync, not union-only).
+write_servers "$TMP/instances/B/.minecraft/servers.dat" \
+  'Общий|same.example' 'Beta|beta.example' 'Новый A|new-a.example' 'Новый B|new-b.example'
+(
+  cd "$TMP/instances/B/.minecraft"
+  python3 "$RUNTIME" hook post
+)
+assert_ips "$TMP/shared/servers.dat" 'same.example,beta.example,new-a.example,new-b.example'
+[[ -f "$TMP/instances/B/.minecraft/global-post.called" ]]
+
+# Re-open A: it must receive B's final list, not its stale pre-B list.
+(
+  cd "$TMP/instances/A/.minecraft"
+  python3 "$RUNTIME" hook pre
+)
+assert_ips "$TMP/instances/A/.minecraft/servers.dat" 'same.example,beta.example,new-a.example,new-b.example'
+
+# Disable restores original Prism commands and leaves an ordinary local servers.dat.
+run --instance A --disable servers >/dev/null
+[[ ! -e "$TMP/instances/A/.minecraft/.sync_prism_instances.servers.json" ]]
+[[ -f "$TMP/instances/A/.minecraft/servers.dat" && ! -L "$TMP/instances/A/.minecraft/servers.dat" ]]
+python3 - "$TMP/instances/A/instance.cfg" <<'PY'
+from pathlib import Path
+import sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+assert r"PreLaunchCommand=python3 -c \"open('pre.called','w').write('1')\"" in lines, lines
+assert r"PostExitCommand=python3 -c \"open('post.called','w').write('1')\"" in lines, lines
 PY
 
-[[ ! -L "$TMP/instances/A/.minecraft/servers.dat" ]]
-run --status >/dev/null
-[[ -L "$TMP/instances/A/.minecraft/servers.dat" ]]
-[[ -f "$TMP/instances/A/.minecraft/.sync_prism_instances.servers" ]]
-assert_ips "$TMP/shared/servers.dat" "alpha.example,same.example,beta.example,gamma.example"
-
-# Миграция v2.0: после safe replace старый симлинк может оказаться в
-# servers.dat_old. Новый скрипт должен распознать это без ручного включения.
-mkdir -p "$TMP/instances/Legacy/.minecraft"
-ln -s "$TMP/shared/servers.dat" "$TMP/instances/Legacy/.minecraft/servers.dat_old"
-python3 - "$TMP/instances/Legacy/.minecraft/servers.dat" <<'PY'
-import pathlib, struct, sys
-p = pathlib.Path(sys.argv[1])
-def s(v):
-    b=v.encode("ascii"); return struct.pack(">H",len(b))+b
-def srv(name, ip):
-    return b"\x08"+s("ip")+s(ip)+b"\x08"+s("name")+s(name)+b"\x00"
-p.write_bytes(b"\x0a"+s("")+b"\x09"+s("servers")+b"\x0a"+struct.pack(">i",1)+srv("Legacy","legacy.example")+b"\x00")
-PY
-run --status >/dev/null
-[[ -f "$TMP/instances/Legacy/.minecraft/.sync_prism_instances.servers" ]]
-[[ -L "$TMP/instances/Legacy/.minecraft/servers.dat" ]]
-assert_ips "$TMP/shared/servers.dat" "alpha.example,same.example,beta.example,gamma.example,legacy.example"
-
-# Отключение должно вернуть обычную локальную копию, а не удалить данные.
-run --instance B --disable all >/dev/null
-[[ ! -L "$TMP/instances/B/.minecraft/servers.dat" ]]
-[[ ! -e "$TMP/instances/B/.minecraft/.sync_prism_instances.servers" ]]
-[[ -f "$TMP/instances/B/.minecraft/saves/world-A/level.dat" ]]
-[[ -f "$TMP/instances/B/.minecraft/saves/world-B/level.dat" ]]
-
-# Битый NBT не должен уничтожить ни локальный, ни общий servers.dat.
+# Legacy v2 migration: old shared symlink may have been moved to servers.dat_old,
+# while Minecraft left a new ordinary servers.dat with unsynced changes.
 mkdir -p "$TMP/instances/C/.minecraft"
-printf 'broken nbt' > "$TMP/instances/C/.minecraft/servers.dat"
+cat > "$TMP/instances/C/instance.cfg" <<'CFG'
+InstanceType=OneSix
+name=C
+CFG
+printf '%s\n' "$TMP/shared/servers.dat" > "$TMP/instances/C/.minecraft/.sync_prism_instances.servers"
+ln -s "$TMP/shared/servers.dat" "$TMP/instances/C/.minecraft/servers.dat_old"
+write_servers "$TMP/instances/C/.minecraft/servers.dat" 'Legacy new|legacy-new.example'
+run --status >/dev/null
+[[ -f "$TMP/instances/C/.minecraft/.sync_prism_instances.servers.json" ]]
+[[ ! -L "$TMP/instances/C/.minecraft/servers.dat" ]]
+assert_ips "$TMP/shared/servers.dat" 'same.example,beta.example,new-a.example,new-b.example,legacy-new.example'
+
+# Corrupt NBT must not damage the shared list or leave half-installed hooks/state.
+mkdir -p "$TMP/instances/D/.minecraft"
+printf 'InstanceType=OneSix\nname=D\n' > "$TMP/instances/D/instance.cfg"
+printf 'broken nbt' > "$TMP/instances/D/.minecraft/servers.dat"
 before="$(sha256sum "$TMP/shared/servers.dat" | cut -d' ' -f1)"
-if run --instance C --enable servers >/dev/null 2>&1; then
+if run --instance D --enable servers >/dev/null 2>&1; then
   echo "corrupt servers.dat unexpectedly succeeded" >&2
   exit 1
 fi
-[[ -f "$TMP/instances/C/.minecraft/servers.dat" ]]
-[[ ! -L "$TMP/instances/C/.minecraft/servers.dat" ]]
 after="$(sha256sum "$TMP/shared/servers.dat" | cut -d' ' -f1)"
 [[ "$before" == "$after" ]]
+[[ ! -e "$TMP/instances/D/.minecraft/.sync_prism_instances.servers.json" ]]
+! grep -q 'server_sync.py' "$TMP/instances/D/instance.cfg"
 
-echo "OK"
+# Status should show B/C server sync as enabled after all of the above.
+status="$(run --status)"
+grep -A5 '^B$' <<<"$status" | grep -q '✓ Серверы'
+grep -A5 '^C$' <<<"$status" | grep -q '✓ Серверы'
+
+echo OK
