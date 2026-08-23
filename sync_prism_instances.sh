@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly VERSION="2.1.0"
+readonly VERSION="3.0.0"
 readonly DEFAULT_TARGET="$HOME/.minecraft"
 readonly RAW_BASE="https://raw.githubusercontent.com/martrtr/sync_prism_instances/main"
+readonly RUNTIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/sync_prism_instances"
+readonly SERVER_STATE_NAME=".sync_prism_instances.servers.json"
 readonly SERVER_MARKER_NAME=".sync_prism_instances.servers"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
+SERVER_HELPER="$RUNTIME_DIR/server_sync.py"
+PYTHON_BIN=""
 
 SYNC_ITEMS=(saves resourcepacks shaderpacks screenshots servers.dat)
 TARGET_DIR="$DEFAULT_TARGET"
 PRISM_INSTANCES_DIR="${PRISM_INSTANCES_DIR:-}"
+PRISM_CONFIG=""
 INSTANCE_QUERY=""
 ACTION=""
 ACTION_ITEMS=""
@@ -102,21 +108,23 @@ resolve_prism_dir() {
   if [[ -n "$PRISM_INSTANCES_DIR" ]]; then
     [[ -d "$PRISM_INSTANCES_DIR" ]] || fail "папка Prism Launcher не найдена: $PRISM_INSTANCES_DIR"
     PRISM_INSTANCES_DIR="$(canonical_path "$PRISM_INSTANCES_DIR")"
-    return
+  else
+    local candidates=(
+      "$HOME/.local/share/PrismLauncher/instances"
+      "$HOME/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"
+    )
+    local dir
+    for dir in "${candidates[@]}"; do
+      if [[ -d "$dir" ]]; then
+        PRISM_INSTANCES_DIR="$(canonical_path "$dir")"
+        break
+      fi
+    done
+    [[ -n "$PRISM_INSTANCES_DIR" ]] || fail "не найдена папка Prism Launcher; укажите её через --prism-dir"
   fi
 
-  local candidates=(
-    "$HOME/.local/share/PrismLauncher/instances"
-    "$HOME/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"
-  )
-  local dir
-  for dir in "${candidates[@]}"; do
-    if [[ -d "$dir" ]]; then
-      PRISM_INSTANCES_DIR="$(canonical_path "$dir")"
-      return
-    fi
-  done
-  fail "не найдена папка Prism Launcher; укажите её через --prism-dir"
+  local candidate="$(dirname "$PRISM_INSTANCES_DIR")/prismlauncher.cfg"
+  [[ -f "$candidate" ]] && PRISM_CONFIG="$(canonical_path "$candidate")"
 }
 
 find_instances() {
@@ -139,40 +147,8 @@ get_instance_name() {
   basename "$(dirname "$1")"
 }
 
-link_points_to() {
-  local src="$1" dst="$2"
-  [[ -L "$src" ]] || return 1
-  [[ "$(canonical_path "$src")" == "$(canonical_path "$dst")" ]]
-}
-
-server_marker() {
-  printf '%s/%s\n' "$1" "$SERVER_MARKER_NAME"
-}
-
-servers_managed() {
-  local instance="$1" marker saved_target
-  marker="$(server_marker "$instance")"
-  [[ -f "$marker" ]] || return 1
-  IFS= read -r saved_target < "$marker" || return 1
-  [[ -n "$saved_target" ]] || return 1
-  [[ "$(canonical_path "$saved_target")" == "$TARGET_DIR" ]]
-}
-
-write_server_marker() {
-  local instance="$1" marker tmp
-  marker="$(server_marker "$instance")"
-  tmp="$(mktemp "$instance/.sync_prism_instances.servers.tmp.XXXXXX")"
-  printf '%s\n' "$TARGET_DIR" > "$tmp"
-  mv -f -- "$tmp" "$marker"
-}
-
-is_synced() {
-  local instance="$1" item="$2"
-  if [[ "$item" == servers.dat ]]; then
-    servers_managed "$instance"
-  else
-    link_points_to "$instance/$item" "$TARGET_DIR/$item"
-  fi
+instance_cfg() {
+  printf '%s/instance.cfg\n' "$(dirname "$1")"
 }
 
 ensure_target() {
@@ -190,97 +166,98 @@ copy_dir_contents() {
   cp -a -- "$src/." "$dst/"
 }
 
-resolve_merge_helper() {
-  local sibling="${SCRIPT_DIR:+$SCRIPT_DIR/merge_servers.py}"
+ensure_server_helper() {
+  [[ -n "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || true)"
+  [[ -n "$PYTHON_BIN" ]] || fail "для синхронизации servers.dat нужен python3"
+  mkdir -p "$RUNTIME_DIR"
+
+  local sibling="${SCRIPT_DIR:+$SCRIPT_DIR/server_sync.py}"
   if [[ -n "$sibling" && -f "$sibling" ]]; then
-    printf '%s\n' "$sibling"
-    return 0
-  fi
-
-  command -v curl >/dev/null 2>&1 || fail "merge_servers.py не найден рядом со скриптом, а curl недоступен"
-  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sync_prism_instances"
-  local helper="$cache_dir/merge_servers-$VERSION.py"
-  if [[ ! -s "$helper" ]]; then
-    mkdir -p "$cache_dir"
-    local tmp="$helper.tmp.$$"
-    curl -fsSL "$RAW_BASE/merge_servers.py" -o "$tmp" || {
-      rm -f -- "$tmp"
-      fail "не удалось загрузить merge_servers.py"
-    }
-    mv -f -- "$tmp" "$helper"
-  fi
-  printf '%s\n' "$helper"
-}
-
-merge_servers_dat() {
-  local shared="$1" local_file="$2"
-  command -v python3 >/dev/null 2>&1 || fail "для безопасного объединения servers.dat нужен python3"
-
-  local helper tmp
-  helper="$(resolve_merge_helper)"
-  tmp="$(mktemp "${shared}.tmp.XXXXXX")"
-  if ! python3 "$helper" "$shared" "$local_file" "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  mv -f -- "$tmp" "$shared"
-}
-
-migrate_legacy_server_state() {
-  local instance src old dst
-  dst="$TARGET_DIR/servers.dat"
-  for instance in "${instances[@]}"; do
-    servers_managed "$instance" && continue
-    src="$instance/servers.dat"
-    old="$instance/servers.dat_old"
-    # v2.0 хранил состояние только в самом симлинке. После atomic replace
-    # Minecraft часто оставляет прежний линк в servers.dat_old.
-    if link_points_to "$src" "$dst" || link_points_to "$old" "$dst"; then
-      write_server_marker "$instance"
+    if [[ "$(canonical_path "$sibling")" != "$(canonical_path "$SERVER_HELPER")" ]]; then
+      cp -f -- "$sibling" "$SERVER_HELPER"
     fi
-  done
-}
-
-reconcile_server_instance() {
-  local instance="$1" src dst
-  servers_managed "$instance" || return 0
-  src="$instance/servers.dat"
-  dst="$TARGET_DIR/servers.dat"
-
-  if link_points_to "$src" "$dst"; then
-    return 0
-  fi
-
-  if [[ -L "$src" ]]; then
-    warn "$(get_instance_name "$instance")/servers.dat — сторонняя символьная ссылка; не перезаписываю"
-    return 1
-  fi
-  if [[ -e "$src" && ! -f "$src" ]]; then
-    warn "$src существует, но это не файл; не перезаписываю"
-    return 1
-  fi
-
-  # Если игра заменила симлинк обычным servers.dat, сначала забираем все
-  # изменения из него в общий файл. Локальный файл удаляется только после
-  # успешного NBT merge.
-  if [[ -f "$src" ]]; then
-    merge_servers_dat "$dst" "$src" || {
-      warn "не удалось объединить servers.dat инстанса $(get_instance_name "$instance"); локальный файл сохранён"
-      return 1
+  else
+    command -v curl >/dev/null 2>&1 || fail "server_sync.py не найден рядом со скриптом, а curl недоступен"
+    local tmp="$SERVER_HELPER.tmp.$$"
+    curl -fsSL "$RAW_BASE/server_sync.py" -o "$tmp" || {
+      rm -f -- "$tmp"
+      fail "не удалось загрузить server_sync.py"
     }
-    rm -f -- "$src"
-  elif [[ ! -f "$dst" ]]; then
-    merge_servers_dat "$dst" "" || return 1
+    mv -f -- "$tmp" "$SERVER_HELPER"
   fi
-
-  ln -s -- "$dst" "$src"
+  chmod 755 "$SERVER_HELPER"
 }
 
-reconcile_managed_servers() {
-  local instance
+marker_target() {
+  local marker="$1/$SERVER_MARKER_NAME"
+  [[ -f "$marker" ]] || return 1
+  local value
+  IFS= read -r value < "$marker" || true
+  [[ -n "$value" ]] || return 1
+  canonical_path "$value"
+}
+
+servers_synced() {
+  local instance="$1"
+  local state="$instance/$SERVER_STATE_NAME"
+  [[ -f "$state" ]] || return 1
+  local marked
+  marked="$(marker_target "$instance")" || return 1
+  [[ "$marked" == "$(canonical_path "$TARGET_DIR/servers.dat")" ]]
+}
+
+is_synced() {
+  local instance="$1" item="$2"
+  if [[ "$item" == servers.dat ]]; then
+    servers_synced "$instance"
+    return
+  fi
+  local src="$instance/$item" dst="$TARGET_DIR/$item"
+  [[ -L "$src" ]] || return 1
+  [[ "$(canonical_path "$src")" == "$(canonical_path "$dst")" ]]
+}
+
+install_server_sync() {
+  local instance="$1"
+  ensure_server_helper
+  local cfg
+  cfg="$(instance_cfg "$instance")"
+  local -a args=(
+    "$PYTHON_BIN" "$SERVER_HELPER" install
+    --game-dir "$instance"
+    --shared "$TARGET_DIR/servers.dat"
+    --instance-cfg "$cfg"
+  )
+  [[ -n "$PRISM_CONFIG" ]] && args+=(--prism-cfg "$PRISM_CONFIG")
+  "${args[@]}"
+}
+
+uninstall_server_sync() {
+  local instance="$1"
+  ensure_server_helper
+  if [[ -f "$instance/$SERVER_STATE_NAME" ]]; then
+    "$PYTHON_BIN" "$SERVER_HELPER" uninstall --game-dir "$instance"
+    return
+  fi
+
+  # Legacy v1/v2 state: install once to absorb any ordinary servers.dat that
+  # Minecraft created after breaking the old symlink, then immediately uninstall.
+  if [[ -f "$instance/$SERVER_MARKER_NAME" || -L "$instance/servers.dat" || -L "$instance/servers.dat_old" ]]; then
+    install_server_sync "$instance"
+    "$PYTHON_BIN" "$SERVER_HELPER" uninstall --game-dir "$instance"
+  fi
+}
+
+migrate_legacy_servers() {
+  local instance marked dst="$TARGET_DIR/servers.dat"
   for instance in "${instances[@]}"; do
-    if servers_managed "$instance"; then
-      reconcile_server_instance "$instance" || true
+    [[ ! -f "$instance/$SERVER_STATE_NAME" ]] || continue
+    marked=""
+    marked="$(marker_target "$instance" 2>/dev/null || true)"
+    if [[ "$marked" == "$(canonical_path "$dst")" ]] \
+      || { [[ -L "$instance/servers.dat" ]] && [[ "$(canonical_path "$instance/servers.dat")" == "$(canonical_path "$dst")" ]]; } \
+      || { [[ -L "$instance/servers.dat_old" ]] && [[ "$(canonical_path "$instance/servers.dat_old")" == "$(canonical_path "$dst")" ]]; }; then
+      install_server_sync "$instance" || warn "не удалось мигрировать серверную синхронизацию для $(get_instance_name "$instance")"
     fi
   done
 }
@@ -290,63 +267,43 @@ enable_sync() {
   local src="$instance/$item" dst="$TARGET_DIR/$item" type
   type="$(item_type "$item")"
 
-  if is_synced "$instance" "$item"; then
-    [[ "$item" == servers.dat ]] && reconcile_server_instance "$instance"
-    return 0
+  if [[ "$type" == servers ]]; then
+    install_server_sync "$instance"
+    return
   fi
+
+  is_synced "$instance" "$item" && return 0
   if [[ -L "$src" ]]; then
     warn "$(get_instance_name "$instance")/$item уже является сторонней символьной ссылкой — пропускаю"
     return 1
   fi
 
-  case "$type" in
-    folder)
-      mkdir -p "$dst"
-      if [[ -e "$src" && ! -d "$src" ]]; then
-        warn "$src существует, но это не каталог — пропускаю"
-        return 1
-      fi
-      if [[ -d "$src" ]]; then
-        copy_dir_contents "$src" "$dst"
-        rm -rf -- "$src"
-      fi
-      ln -s -- "$dst" "$src"
-      ;;
-    servers)
-      if [[ -e "$src" && ! -f "$src" ]]; then
-        warn "$src существует, но это не файл — пропускаю"
-        return 1
-      fi
-      merge_servers_dat "$dst" "$src" || return 1
-      [[ -e "$src" ]] && rm -f -- "$src"
-      ln -s -- "$dst" "$src"
-      write_server_marker "$instance"
-      ;;
-  esac
+  mkdir -p "$dst"
+  if [[ -e "$src" && ! -d "$src" ]]; then
+    warn "$src существует, но это не каталог — пропускаю"
+    return 1
+  fi
+  if [[ -d "$src" ]]; then
+    copy_dir_contents "$src" "$dst"
+    rm -rf -- "$src"
+  fi
+  ln -s -- "$dst" "$src"
 }
 
 disable_sync() {
   local instance="$1" item="$2"
-  local src="$instance/$item" dst="$TARGET_DIR/$item" type marker
+  local src="$instance/$item" dst="$TARGET_DIR/$item" type
   type="$(item_type "$item")"
 
+  if [[ "$type" == servers ]]; then
+    uninstall_server_sync "$instance"
+    return
+  fi
+
   is_synced "$instance" "$item" || return 0
-  case "$type" in
-    folder)
-      rm -- "$src"
-      mkdir -p "$src"
-      [[ -d "$dst" ]] && copy_dir_contents "$dst" "$src"
-      ;;
-    servers)
-      # Сначала забираем возможные изменения, сделанные Minecraft после
-      # разрушения симлинка, и только потом отключаем управление.
-      reconcile_server_instance "$instance" || return 1
-      rm -f -- "$src"
-      [[ -f "$dst" ]] && cp -a -- "$dst" "$src"
-      marker="$(server_marker "$instance")"
-      rm -f -- "$marker"
-      ;;
-  esac
+  rm -- "$src"
+  mkdir -p "$src"
+  [[ -d "$dst" ]] && copy_dir_contents "$dst" "$src"
 }
 
 status_line() {
@@ -587,11 +544,7 @@ main() {
   resolve_prism_dir
   ensure_target
   find_instances
-
-  # v2.0 определял серверную синхронизацию по симлинку. Мигрируем такие
-  # инстансы и каждый запуск восстанавливаем servers.dat, если игра его заменила.
-  migrate_legacy_server_state
-  reconcile_managed_servers
+  migrate_legacy_servers
 
   case "$ACTION" in
     '') run_tui ;;
