@@ -1,8 +1,8 @@
 # sync_prism_instances
 
-Минималистичный TUI/CLI для Prism Launcher. Делает общими между инстансами миры, ресурспаки, шейдеры, скриншоты и список серверов.
+Минималистичный TUI/CLI для синхронизации данных между инстансами Prism Launcher: миров, ресурспаков, шейдеров, скриншотов и списка серверов.
 
-Данные хранятся в общей папке (по умолчанию `~/.minecraft`). Каталоги подключаются симлинками, а `servers.dat` перед подключением объединяется без потери уже добавленных серверов. Если Minecraft заменит симлинк `servers.dat` обычным файлом при сохранении, следующий запуск скрипта автоматически сольёт изменения обратно и восстановит ссылку.
+Папки синхронизируются через симлинки. `servers.dat` синхронизируется отдельно через `PreLaunchCommand`/`PostExitCommand` Prism: перед запуском инстанс получает актуальный список, после выхода его изменения мержатся обратно. Уже существующие серверы не теряются.
 
 Требования: Linux, Bash 4+, Python 3.
 
@@ -12,13 +12,13 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances/main/sync_prism_instances.sh)
 ```
 
-Для fish:
+Fish:
 
 ```fish
 bash (curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances/main/sync_prism_instances.sh | psub)
 ```
 
-Свой каталог:
+Своя общая папка:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/martrtr/sync_prism_instances/main/sync_prism_instances.sh) --target ~/MinecraftShared
